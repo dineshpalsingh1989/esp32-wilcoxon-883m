@@ -1,4 +1,4 @@
-# Esp32-wilcoxon-883m
+# Esp32-Wilcoxon-883M
 Firmware for Industrial IoT Vibration Monitoring using ESP32 and Wilcoxon 883M sensors.
 # 🏭 Industrial IoT Vibration Monitor (ESP32 + Wilcoxon 883M)
 
