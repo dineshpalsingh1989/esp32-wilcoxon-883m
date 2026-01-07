@@ -1,4 +1,3 @@
-
 #include <SPI.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -35,42 +34,37 @@ Adafruit_NeoPixel pixels(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define BUZZER_PIN 12
 #define USER_BUTTON_PIN 3
 
-// --- Device Info ---
-const char* DEVICE_MODEL_DEFAULT = "Wilcoxon 883M";
-const char* DEVICE_SERIAL_NUMBER = "00000000"; // Generic Serial for GitHub
-const char* FIRMWARE_VERSION = "3.2.0 - Modbus 0x2B Identity";
+// --- WiFi AP Defaults ---
+#define WIFI_AP_SSID "ILA_Sensor_AP"
+#define WIFI_AP_PASS "12345678" // Default Password for AP Mode
 
-// --- NEW: Dynamic Sensor Identity Struct ---
-struct SensorIdentity {
-    String vendor = "Reading...";
-    String productCode = "Unknown";
-    String firmware = "Unknown";
-    String url = "Unknown";
-    String uuid = "Unknown";
-    String model = "883M"; 
-    bool valid = false;
-};
-SensorIdentity globalSensorInfo;
+// --- Device Info (Dynamic) ---
+String sensor_model = "Wilcoxon 883M"; 
+String sensor_serial = "Unknown";
+String sensor_vendor_url = "Unknown"; 
+String sensor_fw_version = "Unknown";
+const char* FIRMWARE_VERSION = "3.8.0 - GitHub Release";
 
 // --- NTP & Time Config ---
 const char* ntpServer = "pool.ntp.org";
-long  gmtOffset_sec = 28800; // Default GMT+8 (8 * 3600)
+long  gmtOffset_sec = 28800; // Default GMT+8
 int   daylightOffset_sec = 0;
 
-// --- MQTT Configuration (Sanitized for GitHub) ---
+// --- MQTT Configuration ---
+// DEFAULTS FOR GITHUB: All sensitive data removed. 
+// Users must configure these via the Web Dashboard.
 bool mqttEnabled = true;
 bool mqtt_use_tls = true;
 bool mqtt_skip_cert_validation = true;
 bool mqtt_publish_progress = true;
-// REPLACE THESE WITH YOUR ACTUAL CREDENTIALS BEFORE UPLOADING TO BOARD
-String mqtt_server_str = "YOUR_MQTT_BROKER_ADDRESS"; 
+String mqtt_server_str = ""; 
 int mqtt_port_val = 8883;
-String mqtt_user_str = "YOUR_MQTT_USERNAME";
-String mqtt_pass_str = "YOUR_MQTT_PASSWORD";
+String mqtt_user_str = "";
+String mqtt_pass_str = "";
 String mqtt_topic_str = "883M";
 String mqtt_command_topic = "883M/command";
 String mqtt_status_topic = "883M/status";
-char mqttStatus[128] = "Initializing..."; 
+char mqttStatus[128] = "Waiting for config..."; 
 
 // --- Wi-Fi & Web Server ---
 WebServer server(80);
@@ -115,7 +109,7 @@ ModbusTCP modbusTCPServer;
 char systemStatus[128] = "Initializing...";
 char trafficLightStatus[20] = "IDLE"; 
 String globalLogBuffer = ""; 
-String lastResetReason = "Unknown"; 
+String lastResetReason = "Unknown";
 enum DynamicDataState { DD_IDLE, DD_REQUEST_DATA, DD_WAITING_FOR_DATA };
 DynamicDataState currentDataState = DD_IDLE;
 enum CaptureMode { CAPTURE_NONE, CAPTURE_WAVEFORM, CAPTURE_SPECTRUM, CAPTURE_BOTH };
@@ -154,7 +148,7 @@ float crestFactorX=0.0, crestFactorY=0.0, crestFactorZ=0.0;
 float stdDeviationX=0.0, stdDeviationY=0.0, stdDeviationZ=0.0;
 float temperature=0.0;
 // Extended Metrics
-float accelMetricRmsX=0.0, accelMetricRmsY=0.0, accelMetricRmsZ=0.0;     
+float accelMetricRmsX=0.0, accelMetricRmsY=0.0, accelMetricRmsZ=0.0;    
 float accelMetricPeakX=0.0, accelMetricPeakY=0.0, accelMetricPeakZ=0.0; 
 float accelMetricRms2X=0.0, accelMetricRms2Y=0.0, accelMetricRms2Z=0.0; 
 float accelMetricPeak2X=0.0, accelMetricPeak2Y=0.0, accelMetricPeak2Z=0.0; 
@@ -216,7 +210,6 @@ void handleGetMetricsLogData(); void handleMetricsLogControl(); void handleDownl
 void handleClearMetricsLog(); void handleClearDynamicData(); void handleReboot();
 void handleDeviceInfo(); void handleModbusTcpSettings(); void handleSaveModbusTcp();
 void handleSetMetricsInterval(); 
-// NEW HANDLERS
 void handleTimeSettings(); void handleSaveTimeSettings(); void handleSetManualTime();
 String formatUptime(unsigned long ms);
 void publishProgressUpdate(const char* progress_message);
@@ -225,7 +218,8 @@ void updateModbusTCPCache();
 void updateModbusTCPDataWindow();
 void logMessage(String msg);
 String getResetReasonString();
-void querySensorInfo(); // NEW PROTOYPE
+void handleClearSystemLog();
+void readDeviceIdentification();
 
 // =================================================================
 // --- UTILITY FUNCTIONS
@@ -248,7 +242,6 @@ String getTimestamp() {
   return String(timeString);
 }
 
-// --- NEW: Safe Logging Function ---
 void logMessage(String msg) {
     Serial.println(msg);
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -344,70 +337,101 @@ std::vector<SpectrumPeak> findSpectrumPeaks(const int16_t* spectrum_buffer, int 
 }
 
 // =================================================================
-// --- NEW: MODBUS 0x2B READER (Identity)
+// --- MODBUS IDENTITY FUNCTION (UPDATED FOR DUAL QUERY)
 // =================================================================
-void querySensorInfo() {
-    logMessage("[Modbus] Querying Device Info (0x2B)...");
+void fetchSensorIdentity() {
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
     
-    // Ensure mutex is free
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-        logMessage("[Modbus] Error: Mutex timeout, skipping 0x2B query");
-        return;
-    }
+    logMessage("[System] Fetching Sensor Identity (Dual Query Mode)...");
 
-    auto sendRawRequest = [](uint8_t readCode, std::map<uint8_t, String>& results) {
-        uint8_t request[] = { modbus_slave_id_val, 0x2B, 0x0E, readCode, 0x00, 0x00, 0x00 };
-        // CRC
+    // We must run TWO separate queries to get all data:
+    // Query 1 (Code 0x01): Basic -> Gets Firmware (Obj 0x02) and Product Code (Obj 0x01)
+    // Query 2 (Code 0x02): Regular -> Gets Model (Obj 0x05) and Serial/UUID (Obj 0x04)
+    
+    uint8_t readCodes[2] = {0x01, 0x02};
+
+    for (int q = 0; q < 2; q++) {
+        uint8_t currentCode = readCodes[q];
+        
+        // 1. Flush UART buffers
+        while(Serial1.available()) Serial1.read();
+        
+        // 2. Construct Request: [SlaveID, 2B, 0E, ReadCode, 00, CRC, CRC]
+        uint8_t request[] = {modbus_slave_id_val, 0x2B, 0x0E, currentCode, 0x00, 0x00, 0x00};
+        
+        // Calculate CRC manually
         uint16_t crc = 0xFFFF;
-        for (int pos = 0; pos < 5; pos++) {
-            crc ^= (uint16_t)request[pos];
-            for (int i = 8; i != 0; i--) { if ((crc & 0x0001) != 0) { crc >>= 1; crc ^= 0xA001; } else { crc >>= 1; } }
+        for (int i = 0; i < 5; i++) {
+            crc ^= request[i];
+            for (int j = 0; j < 8; j++) {
+                if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+                else crc >>= 1;
+            }
         }
-        request[5] = crc & 0xFF; request[6] = (crc >> 8) & 0xFF; 
+        request[5] = crc & 0xFF;
+        request[6] = crc >> 8;
 
-        while(Serial1.available()) Serial1.read(); 
+        // 3. Send Request
         Serial1.write(request, 7);
-        Serial1.flush();
+        Serial1.flush(); 
 
-        unsigned long start = millis();
-        while (Serial1.available() < 5) { if (millis() - start > 500) return false; delay(5); }
-
-        uint8_t buffer[256];
-        int len = Serial1.readBytes(buffer, 256);
-        if (len < 10) return false;
-        if (buffer[1] != 0x2B || buffer[2] != 0x0E) return false;
-
-        int objCount = buffer[7];
-        int currentByte = 8;
-        for (int i = 0; i < objCount; i++) {
-            if (currentByte >= len) break;
-            uint8_t objId = buffer[currentByte];
-            uint8_t objLen = buffer[currentByte + 1];
-            currentByte += 2; 
-            String val = "";
-            for (int j = 0; j < objLen; j++) { if (currentByte < len) val += (char)buffer[currentByte++]; }
-            results[objId] = val;
+        // 4. Read Response (FIXED TIMING LOGIC)
+        uint8_t buffer[256]; 
+        int idx = 0;
+        unsigned long startTime = millis();
+        unsigned long lastByteTime = millis();
+        
+        // Wait up to 1000ms total for the transaction
+        while (millis() - startTime < 1000) { 
+            if (Serial1.available()) {
+                if (idx < 256) buffer[idx++] = Serial1.read();
+                lastByteTime = millis(); // Reset "silence" timer
+            } else {
+                // Only break if we have received a header (at least 5 bytes) 
+                // AND the line has been silent for >50ms (End of Frame)
+                if (idx > 5 && (millis() - lastByteTime > 50)) {
+                    break; 
+                }
+                delay(1);
+            }
         }
-        return true;
-    };
 
-    std::map<uint8_t, String> dataMap;
-    // 0x01 Basic
-    if(sendRawRequest(0x01, dataMap)) {
-        if(dataMap.count(0x00)) globalSensorInfo.vendor = dataMap[0x00];
-        if(dataMap.count(0x01)) globalSensorInfo.productCode = dataMap[0x01];
-        if(dataMap.count(0x02)) globalSensorInfo.firmware = dataMap[0x02];
-    }
-    delay(50); 
-    // 0x02 Regular
-    if(sendRawRequest(0x02, dataMap)) {
-        if(dataMap.count(0x03)) globalSensorInfo.url = dataMap[0x03];
-        if(dataMap.count(0x04)) globalSensorInfo.uuid = dataMap[0x04];
-        if(dataMap.count(0x05)) globalSensorInfo.model = dataMap[0x05];
+        // 5. Parse Response
+        // Header check: SlaveID + Func(2B) + MEI(0E) + ReadCode(Matches sent)
+        if (idx > 8 && buffer[1] == 0x2B && buffer[2] == 0x0E && buffer[3] == currentCode) {
+            int objCount = buffer[7]; // Number of objects returned
+            int ptr = 8; // Start of first object
+            
+            for (int i = 0; i < objCount; i++) {
+                if (ptr + 2 >= idx) break; // Safety check
+                
+                uint8_t objId = buffer[ptr];
+                uint8_t objLen = buffer[ptr+1];
+                String objData = "";
+                
+                // Extract String
+                for (int k = 0; k < objLen; k++) {
+                    if (ptr + 2 + k < idx) objData += (char)buffer[ptr + 2 + k];
+                }
+                
+                // --- MAPPING LOGIC ---
+                // Found in Basic Query (0x01)
+                if (objId == 0x01) sensor_serial = objData;     // User identified this (ProductCode) as the Serial Number
+                if (objId == 0x02) sensor_fw_version = objData;  // MajorMinorRevision
+                
+                // Found in Regular Query (0x02)
+                if (objId == 0x05) sensor_model = objData;       // ModelName
+                if (objId == 0x03) sensor_vendor_url = objData;  // VendorUrl (Replaces unknown UUID)
+                
+                ptr += (2 + objLen); // Move to next object
+            }
+        } else {
+             logMessage("[System] ID Query " + String(currentCode) + " failed. Bytes: " + String(idx));
+        }
+        delay(100); // Increased pause between queries
     }
     
-    globalSensorInfo.valid = true;
-    logMessage("[Modbus] Identity Updated: " + globalSensorInfo.vendor + " " + globalSensorInfo.model);
+    logMessage("[System] ID Result -> Model: " + sensor_model + " | Serial: " + sensor_serial + " | Vendor: " + sensor_vendor_url);
     xSemaphoreGive(dataMutex);
 }
 
@@ -417,19 +441,11 @@ void querySensorInfo() {
 void publishDeviceHealth() {
     if (!mqttClient || !mqttClient->connected()) return;
     DynamicJsonDocument doc(2048); 
-    doc["model"] = globalSensorInfo.model; // Use dynamic model
-    doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+    doc["model"] = sensor_model; 
+    doc["serial_number"] = sensor_serial; 
+    doc["vendor_url"] = sensor_vendor_url; // Added
     doc["timestamp"] = getTimestamp();
     doc["type"] = "health_status";
-    
-    // --- ADD SENSOR IDENTITY TO MQTT ---
-    JsonObject sensorInfo = doc.createNestedObject("sensor_info");
-    sensorInfo["vendor"] = globalSensorInfo.vendor;
-    sensorInfo["product_code"] = globalSensorInfo.productCode;
-    sensorInfo["firmware_version"] = globalSensorInfo.firmware;
-    sensorInfo["uuid"] = globalSensorInfo.uuid;
-    sensorInfo["model_name"] = globalSensorInfo.model;
-
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         doc["uptime"] = formatUptime(millis());
         doc["wifi_signal_rssi"] = WiFi.RSSI();
@@ -445,8 +461,9 @@ void publishDeviceHealth() {
 void publishMetrics() {
     if (!mqttClient || !mqttClient->connected()) return;
     DynamicJsonDocument doc(4096); 
-    doc["model"] = globalSensorInfo.model; // Use dynamic model
-    doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+    doc["model"] = sensor_model;
+    doc["serial_number"] = sensor_serial;
+    doc["vendor_url"] = sensor_vendor_url; // Added
     doc["timestamp"] = getTimestamp();
     doc["type"] = "metrics";
     JsonObject data = doc.createNestedObject("data");
@@ -508,8 +525,8 @@ void publishMetrics() {
 void publishDownsampledWaveform() {
   if (!mqttClient || !mqttClient->connected()) return;
   DynamicJsonDocument doc(6144); 
-  doc["model"] = globalSensorInfo.model;
-  doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+  doc["model"] = sensor_model;
+  doc["serial_number"] = sensor_serial;
   doc["timestamp"] = getTimestamp();
   doc["type"] = "waveform_preview";
   JsonArray data = doc.createNestedArray("data");
@@ -560,8 +577,8 @@ void publishFullWaveformInChunks(Axis capturedAxis) {
 
     for (int i = 0; i < totalChunks; i++) {
         DynamicJsonDocument doc(4096); 
-        doc["model"] = globalSensorInfo.model;
-        doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+        doc["model"] = sensor_model;
+        doc["serial_number"] = sensor_serial;
         doc["timestamp"] = getTimestamp();
         doc["type"] = "waveform_chunk";
         doc["axis"] = axisStr;
@@ -609,8 +626,8 @@ void publishFullSpectrumInChunks(Axis capturedAxis) {
 
     for (int i = 0; i < totalChunks; i++) {
         DynamicJsonDocument doc(4096); 
-        doc["model"] = globalSensorInfo.model;
-        doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+        doc["model"] = sensor_model;
+        doc["serial_number"] = sensor_serial;
         doc["timestamp"] = getTimestamp();
         doc["type"] = "spectrum_chunk";
         doc["axis"] = axisStr;
@@ -633,8 +650,8 @@ void publishFullSpectrumInChunks(Axis capturedAxis) {
 void publishSpectrumPeaks(Axis capturedAxis, const std::vector<SpectrumPeak>& peaks) {
     if (!mqttClient || !mqttClient->connected()) return;
     DynamicJsonDocument doc(2048);
-    doc["model"] = globalSensorInfo.model;
-    doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+    doc["model"] = sensor_model;
+    doc["serial_number"] = sensor_serial;
     doc["timestamp"] = getTimestamp();
     doc["type"] = "spectrum_peaks";
     String axisStr = "N/A";
@@ -659,8 +676,8 @@ void publishSpectrumPeaks(Axis capturedAxis, const std::vector<SpectrumPeak>& pe
 void publishCombinedSpectrumPeaks() {
     if (!mqttClient || !mqttClient->connected() || xyzPeakDataCache.empty()) return;
     DynamicJsonDocument doc(4096);
-    doc["model"] = globalSensorInfo.model;
-    doc["serial_number"] = DEVICE_SERIAL_NUMBER;
+    doc["model"] = sensor_model;
+    doc["serial_number"] = sensor_serial;
     doc["timestamp"] = getTimestamp();
     doc["type"] = "combined_spectrum_peaks";
     JsonObject peaks_obj = doc.createNestedObject("peaks");
@@ -679,27 +696,14 @@ void publishCombinedSpectrumPeaks() {
     xyzPeakDataCache.clear();
 }
 
-void publishAlert(String alertType, String details) {
-    if (!mqttClient || !mqttClient->connected()) return;
-    DynamicJsonDocument doc(1024);
-    doc["model"] = globalSensorInfo.model;
-    doc["serial_number"] = DEVICE_SERIAL_NUMBER;
-    doc["timestamp"] = getTimestamp();
-    doc["type"] = "alert";
-    doc["alert_type"] = alertType;
-    doc["details"] = details;
-    char payload[1024];
-    serializeJson(doc, payload);
-    mqttClient->publish(mqtt_status_topic.c_str(), payload);
-}
-
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     String topic_str(topic);
     DynamicJsonDocument doc(1024);
     deserializeJson(doc, payload, length);
+    // Note: Checking against global variable which is updated at runtime
     const char* target_sn = doc["serial_number"];
 
-    if (target_sn && strcmp(target_sn, DEVICE_SERIAL_NUMBER) == 0) {
+    if (target_sn && String(target_sn) == sensor_serial) {
         const char* command = doc["command"];
         if (command) {
             logMessage("MQTT Command received: " + String(command));
@@ -803,7 +807,6 @@ bool readLargeDataBlock(uint16_t startAddress, uint16_t totalPoints, int16_t* bu
         } else {
             retryCount++;
             if (retryCount > maxRetries) {
-                // UPDATED: Added [Modbus] tag
                 logMessage("[Modbus] Read fail (Addr: " + String(startAddress + pointsRead) + ")");
                 return false; 
             }
@@ -866,7 +869,6 @@ void handleLongReads() {
         else if (local_requestedAxis == AXIS_Y) START_ADDRESS = ADDR_WAVE_Y_START;
         else if (local_requestedAxis == AXIS_Z) START_ADDRESS = ADDR_WAVE_Z_START;
         else { 
-            // UPDATED: Added [Waveform] tag
             logMessage("[Waveform] Capture failed: Invalid Axis.");
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 isReadingWaveform = false;
@@ -903,7 +905,6 @@ void handleLongReads() {
         else if (local_requestedAxis == AXIS_Y) START_ADDRESS = ADDR_SPEC_Y_START;
         else if (local_requestedAxis == AXIS_Z) START_ADDRESS = ADDR_SPEC_Z_START;
         else { 
-            // UPDATED: Added [Spectrum] tag
             logMessage("[Spectrum] Capture failed: Invalid Axis.");
              if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 isReadingSpectrum = false;
@@ -1125,7 +1126,7 @@ void backgroundLoop(void * pvParameters) {
                 logMessage("AP Mode Forced by Button Press");
                 WiFi.disconnect(true);
                 WiFi.mode(WIFI_AP);
-                WiFi.softAP("ILA_Sensor_AP", "12345678");
+                WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
                 tone(BUZZER_PIN, 2000, 500);
             }
         } else {
@@ -1139,12 +1140,10 @@ void backgroundLoop(void * pvParameters) {
             isAlarmBeeping = true;
             tone(BUZZER_PIN, 1200);
             snprintf(systemStatus, sizeof(systemStatus), "Wi-Fi Disconnected!");
-            // UPDATED: Added [WiFi] tag
             logMessage("[WiFi] Warning: Connection Lost!");
         } else if (!wasWifiConnected && isWifiConnected) {
             wifiDisconnectAlarmActive = false;
             noTone(BUZZER_PIN);
-            // UPDATED: Added [WiFi] tag
             logMessage("[WiFi] Reconnected. IP: " + WiFi.localIP().toString());
             configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // Resync time
         }
@@ -1172,11 +1171,9 @@ void backgroundLoop(void * pvParameters) {
                         xSemaphoreGive(dataMutex);
                     }
                     
-                    // [FIX 2] Feed watchdog before the potentially slow connection attempt
                     esp_task_wdt_reset(); 
 
                     if (mqttClient->connect("esp32-ila-sensor", mqtt_user_str.c_str(), mqtt_pass_str.c_str())) {
-                         // UPDATED: Added [MQTT] tag
                          logMessage("[MQTT] Connected to " + mqtt_server_str);
                          if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                             snprintf(mqttStatus, sizeof(mqttStatus), "Connected");
@@ -1184,7 +1181,6 @@ void backgroundLoop(void * pvParameters) {
                          }
                         mqttClient->subscribe(mqtt_command_topic.c_str());
                     } else {
-                         // UPDATED: Added [MQTT] tag
                          logMessage("[MQTT] Connect Failed rc=" + String(mqttClient->state()));
                     }
                 }
@@ -1326,7 +1322,6 @@ void backgroundLoop(void * pvParameters) {
                             xSemaphoreGive(dataMutex);
                         }
                     } else {
-                        // UPDATED: Added [Sensor] tag
                         logMessage("[Sensor] Failed to request new data (Trigger failed).");
                         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                             snprintf(systemStatus, sizeof(systemStatus), "Failed to request data");
@@ -1357,7 +1352,6 @@ void backgroundLoop(void * pvParameters) {
                                 xSemaphoreGive(dataMutex);
                             }
                         } else if (pollAttemptCounter >= maxPollAttempts) {
-                            // UPDATED: Added [Sensor] tag
                             logMessage("[Sensor] Timeout waiting for 0x0200 ready flag.");
                             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                                 snprintf(systemStatus, sizeof(systemStatus), "Timeout waiting for sensor");
@@ -1460,8 +1454,8 @@ void setup() {
     }
     if (!connected_to_wifi) { 
         WiFi.mode(WIFI_AP); 
-        WiFi.softAP("ILA_Sensor_AP", "12345678"); 
-        logMessage("AP Mode Started: ILA_Sensor_AP");
+        WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS); 
+        logMessage("AP Mode Started: " + String(WIFI_AP_SSID));
     }
 
     wasWifiConnected = (WiFi.status() == WL_CONNECTED);
@@ -1470,10 +1464,10 @@ void setup() {
     Serial1.begin(modbus_baud_rate_val, SERIAL_8N1, RXD_PIN, TXD_PIN);
     node.begin(modbus_slave_id_val, Serial1);
     
-    // --- NEW: Query Sensor Identity immediately ---
-    // This is the best place to query it: after Modbus Init, before main loops
-    querySensorInfo(); 
-    
+    // --- Call Custom Identity Function ---
+    delay(500); 
+    fetchSensorIdentity(); // Bypasses library to send Func 0x2B with no manual flow control
+
     if (connected_to_wifi && modbusTcpEnabled) {
       modbusTCPServer.server(modbusTcpPort);
       modbusTCPServer.addHreg(0, 0, MODBUS_TCP_CACHE_SIZE);
@@ -1513,6 +1507,8 @@ void setup() {
     server.on("/time_settings", HTTP_GET, handleTimeSettings); 
     server.on("/save_time", HTTP_GET, handleSaveTimeSettings); 
     server.on("/set_manual_time", HTTP_GET, handleSetManualTime); 
+    // NEW Handler
+    server.on("/clear_system_log", HTTP_GET, handleClearSystemLog);
     server.onNotFound(handleNotFound);
     
     server.begin();
@@ -1544,16 +1540,15 @@ void setup() {
 void loop() { vTaskDelete(NULL); }
 
 // =================================================================
-// --- WEB SERVER HANDLERS (UPDATED)
+// --- WEB SERVER HANDLERS
 // =================================================================
-// ... [handleRoot, handleMetrics - same as before] ...
 
 void handleRoot() {
 String html = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Sensor Dashboard | )rawliteral" + String(DEVICE_MODEL_DEFAULT) + R"rawliteral(</title>
+    <title>Sensor Dashboard | )rawliteral" + sensor_model + R"rawliteral(</title>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
@@ -1650,8 +1645,8 @@ String html = R"rawliteral(
 <body>
     <div class="header">
         <div class="title-container">
-            <div class="title">)rawliteral" + String(DEVICE_MODEL_DEFAULT) + R"rawliteral(</div>
-            <div class="subtitle">Serial: )rawliteral" + String(DEVICE_SERIAL_NUMBER) + R"rawliteral(</div>
+            <div class="title">)rawliteral" + sensor_model + R"rawliteral(</div>
+            <div class="subtitle">Serial: )rawliteral" + sensor_serial + R"rawliteral(</div>
         </div>
         <div class="time" id="clock">--:--:--</div>
         <div class="menu"><a href="/settings"><i data-lucide="settings"></i>Settings</a></div>
@@ -2778,7 +2773,6 @@ void handleModbusTcpSettings() {
         </form>
     </div>
 
-    <!-- Calculator -->
     <div class="card"><strong>Quick Lookup:</strong> Calculate Page Index for Waveform data.</div>
     <div class="calculator">
         <div class="input-group"><label>Data Type</label><select id="calc-type"><option value="1">Waveform</option><option value="2">Spectrum</option></select></div>
@@ -2787,7 +2781,6 @@ void handleModbusTcpSettings() {
     </div>
     <div id="calc-result"></div>
 
-    <!-- Tabs -->
     <div class="tabs">
         <div class="tab active" onclick="switchTab('live')">Live Registers (0-60)</div>
         <div class="tab" onclick="switchTab('waveform')">Waveform Pages</div>
@@ -3028,24 +3021,41 @@ void handleSetManualTime() {
     server.send(200, "text/plain", "OK");
 }
 
+void handleClearSystemLog() {
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        globalLogBuffer = ""; // Clear the string buffer
+        String ts = getTimestamp();
+        globalLogBuffer = ts + " [System] Log Cleared by User\n";
+        xSemaphoreGive(dataMutex);
+    }
+    server.send(200, "text/plain", "System log cleared.");
+}
+
 void handleDeviceInfo() {
     String uptime = formatUptime(millis());
     String localLog;
+    String d_model, d_serial, d_url, d_fw;
     
     // Get log safely
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         localLog = globalLogBuffer;
+        d_model = sensor_model;
+        d_serial = sensor_serial;
+        d_url = sensor_vendor_url; 
+        d_fw = sensor_fw_version;
         xSemaphoreGive(dataMutex);
     }
     localLog.replace("\n", "<br>");
 
-    // Internet Connection Check
+    // --- NEW: Internet Connection Check Logic ---
     bool internetConnected = (WiFi.status() == WL_CONNECTED);
     String ipAddr = internetConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     String rssiVal = internetConnected ? String(WiFi.RSSI()) + " dBm" : "N/A";
+    // --------------------------------------------
 
     String html = R"rawliteral(
 <!DOCTYPE html><html><head><title>Device Diagnostics</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;background-color:#f4f6f8;display:flex;justify-content:center;padding:20px 0;}
 .container{width:100%;max-width:800px;background-color:white;border-radius:12px;box-shadow:0 8px 20px rgba(0,0,0,.1);text-align:center;padding:30px}
@@ -3055,8 +3065,10 @@ h2{color:#2c3e50;margin-top:0}.info-grid{display:grid;grid-template-columns:1fr 
 .info-value{font-size:16px;color:#343a40;font-weight:500; word-wrap: break-word;}
 .full-width { grid-column: 1 / -1; }
 .log-box { margin-top: 25px; text-align: left; }
-.log-box h3 { margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; }
+.log-header { display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px; }
 .log-content { background-color: #2c3e50; color: #a4b0be; border: 1px solid #e9ecef; border-radius: 8px; padding: 15px; max-height: 400px; overflow-y: auto; font-family: "Consolas", "Monaco", monospace; font-size: 12px; white-space: pre-wrap; line-height: 1.4; }
+.btn-clear { background-color: #e74c3c; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+.btn-clear:hover { background-color: #c0392b; }
 .status-connected { color: #2ecc71; font-weight: bold; }
 .status-disconnected { color: #e74c3c; font-weight: bold; }
 .nav-link{display:inline-block;margin-top:30px;color:#007bff;text-decoration:none;font-weight:600; border: 1px solid #007bff; padding: 10px 20px; border-radius: 6px; transition: all 0.2s; }
@@ -3064,17 +3076,10 @@ h2{color:#2c3e50;margin-top:0}.info-grid{display:grid;grid-template-columns:1fr 
 </style></head><body><div class="container"><h2>Device Diagnostics</h2>
 <div class="info-grid">
 
-<!-- NEW: 883M Sensor Details Box (Modbus 0x2B) -->
-<div class="info-item full-width" style="background:#e3f2fd;border:1px solid #90caf9">
-    <span class="info-label" style="color:#1565c0">Sensor Identity (Modbus 0x2B)</span>
-    <span class="info-value" style="color:#0d47a1; font-size:14px; line-height:1.6">
-        Vendor: <b>)rawliteral" + globalSensorInfo.vendor + R"rawliteral(</b><br>
-        Model: <b>)rawliteral" + globalSensorInfo.model + R"rawliteral(</b><br>
-        Firmware: <b>)rawliteral" + globalSensorInfo.firmware + R"rawliteral(</b><br>
-        UUID: <b>)rawliteral" + globalSensorInfo.uuid + R"rawliteral(</b>
-    </span>
-</div>
-
+<div class="info-item"><span class="info-label">Sensor Model</span><span class="info-value">)rawliteral" + d_model + R"rawliteral(</span></div>
+<div class="info-item"><span class="info-label">Serial Number</span><span class="info-value">)rawliteral" + d_serial + R"rawliteral(</span></div>
+<div class="info-item"><span class="info-label">Vendor URL</span><span class="info-value">)rawliteral" + d_url + R"rawliteral(</span></div>
+<div class="info-item"><span class="info-label">Sensor Firmware</span><span class="info-value">)rawliteral" + d_fw + R"rawliteral(</span></div>
 <div class="info-item"><span class="info-label">Connection Status</span><span class="info-value )rawliteral";
     html += (internetConnected ? "status-connected" : "status-disconnected");
     html += R"rawliteral("> )rawliteral";
@@ -3089,8 +3094,25 @@ h2{color:#2c3e50;margin-top:0}.info-grid{display:grid;grid-template-columns:1fr 
 <div class="info-item"><span class="info-label">Free RAM</span><span class="info-value">)rawliteral" + String(ESP.getFreeHeap()) + R"rawliteral( bytes</span></div>
 <div class="info-item"><span class="info-label">Firmware</span><span class="info-value">)rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral(</span></div>
 </div>
-<div class="log-box"><h3>System Event Log</h3><div class="log-content">)rawliteral" + localLog + R"rawliteral(</div></div>
-<a href="/settings" class="nav-link">&larr; Back to Settings</a></div></body></html>)rawliteral";
+<div class="log-box">
+  <div class="log-header">
+    <h3>System Event Log</h3>
+    <button class="btn-clear" onclick="clearLog()"><i data-lucide="trash-2" style="width:14px;"></i> Clear Log</button>
+  </div>
+  <div class="log-content" id="logContent">)rawliteral" + localLog + R"rawliteral(</div>
+</div>
+<a href="/settings" class="nav-link">&larr; Back to Settings</a></div>
+<script>
+lucide.createIcons();
+function clearLog() {
+    if(confirm("Clear system event log?")) {
+        fetch('/clear_system_log').then(r => r.text()).then(msg => {
+            document.getElementById('logContent').innerHTML = "Log cleared.";
+        });
+    }
+}
+</script>
+</body></html>)rawliteral";
     server.send(200, "text/html", html);
 }
 
