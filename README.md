@@ -157,3 +157,40 @@ Forces the device to wake up the sensor and capture data for a specific axis.
   "command": "trigger_capture",
   "axis": "X"
 }
+```
+(Valid axis values: "X", "Y", "Z")
+
+### 2. Set Auto-Capture Interval
+Updates how often the device automatically cycles through X, Y, and Z axes.
+
+```json
+
+{
+  "serial_number": "ENTER_DEVICE_SERIAL_HERE",
+  "command": "set_interval",
+  "interval_ms": 600000
+}
+(Example: 600000 = 10 Minutes. Set to 2147483647 to disable auto-capture.)
+```
+
+### 3. Remote Reboot
+Forces the ESP32 to restart.
+
+```json
+
+{
+  "serial_number": "ENTER_DEVICE_SERIAL_HERE",
+  "command": "reboot"
+}
+```
+
+
+### 4. Request Immediate Metrics
+Forces the device to publish the latest scalar metrics (RMS/Peak) to MQTT immediately without waiting for the next interval.
+
+```json
+{
+  "serial_number": "ENTER_DEVICE_SERIAL_HERE",
+  "command": "get_metrics"
+}
+```
