@@ -47,6 +47,13 @@ This firmware transforms a standard Modbus RTU vibration sensor into a modern **
 | **GPIO 46** | RGB Status LED |
 
 ---
+Required Libraries:
+
+- 📡 **PubSubClient** (by Nick O'Leary) – MQTT Client  
+- 🧩 **ArduinoJson** (by Benoit Blanchon) – JSON parser (v6 recommended)  
+- ⚙️ **ModbusMaster** (by Doc Walker) – RS485 Modbus RTU  
+- 🌐 **ModbusTCP** (by Matt Fryer) – Modbus TCP network
+---
 
 ## 🚀 Installation & Setup
 
