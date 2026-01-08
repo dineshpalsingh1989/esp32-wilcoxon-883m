@@ -173,3 +173,274 @@ Forces the device to publish the latest scalar metrics (RMS/Peak) to MQTT immedi
   "command": "get_metrics"
 }
 ```
+---
+### MQTT Message 
+  Message type :metrics
+  
+```text
+{
+"object
+model: "Wilcoxon 883M"            
+serial_number: "24120017"           
+vendor_url: "Unknown"
+timestamp: "2026-01-08T14:55:40Z"
+type: "metrics"
+data: object
+accelRms: object
+x: 0
+y: 0
+z: 0
+accelPeak: object
+accelRms2: object
+accelPeak2: object
+accelMetricRms: object
+accelMetricPeak: object
+accelMetricRms2: object
+accelMetricPeak2: object
+veloRms: object
+veloPeak: object
+veloWideRms: object
+veloWidePeak: object
+displRms: object
+displPeak: object
+displLowRms: object
+displLowPeak: object
+truePeak: object
+crestFactor: object
+stdDeviation: object
+temperature: 29.9"
+}
+-END-
+```
+ Message type :waveform_chunk
+
+```text
+
+ msg.payload : Object
+object
+model: "Wilcoxon 883M"
+serial_number: "24120017"
+timestamp: "2026-01-08T16:07:45Z"
+type: "waveform_chunk"  
+axis: "Z"          
+capture_id: "666179"
+chunk_index: 0
+total_chunks: 23
+data: array[600]
+[0 … 9]
+0: 0
+1: 0.013
+2: -0.013
+3: -0.002
+4: -0.001
+5: -0.006
+6: -0.01
+7: -0.004
+8: -0.007
+9: -0.012
+[10 … 19]
+[20 … 29]
+[30 … 39]
+[40 … 49]
+[50 … 59]
+[60 … 69]
+[70 … 79]
+[80 … 89]
+[90 … 99]
+[100 … 109]
+[110 … 119]
+[120 … 129]
+[130 … 139]
+[140 … 149]
+[150 … 159]
+[160 … 169]
+[170 … 179]
+[180 … 189]
+[190 … 199]
+[200 … 209]
+[210 … 219]
+[220 … 229]
+[230 … 239]
+[240 … 249]
+[250 … 259]
+[260 … 269]
+[270 … 279]
+[280 … 289]
+[290 … 299]
+[300 … 309]
+[310 … 319]
+[320 … 329]
+[330 … 339]
+[340 … 349]
+[350 … 359]
+[360 … 369]
+[370 … 379]
+[380 … 389]
+[390 … 399]
+[400 … 409]
+[410 … 419]
+[420 … 429]
+[430 … 439]
+[440 … 449]
+[450 … 459]
+[460 … 469]
+[470 … 479]
+[480 … 489]
+[490 … 499]
+[500 … 509]
+[510 … 519]
+[520 … 529]
+[530 … 539]
+[540 … 549]
+[550 … 559]
+[560 … 569]
+[570 … 579]
+[580 … 589]
+[590 … 599]
+```
+### How to DRAW the graph
+What you plot
+X-axis (horizontal) → Time
+Y-axis (vertical) → Vibration level
+
+
+Each number is one vibration measurement taken very fast (thousands per second).
+
+```text
+Index : Value (g)
+0 :  0
+1 :  0.013
+2 : -0.013
+3 : -0.002
+4 : -0.001
+5 : -0.006
+6 : -0.010
+7 : -0.004
+8 : -0.007
+9 : -0.012
+```
+The graph looks like this conceptually:
+Vibration (g)
+```text
+  |
+0.02 |        ●
+  |     ●
+  |         ●
+0.00 |●-------------------- Time
+  |        ●
+  |     ●
+-0.02|         ●
+```
+ 👉 The line goes up and down around zero
+ 👉 That up-down motion is machine vibration
+ Positive vs Negative (important clarification)
+ Positive g → movement in one direction
+ Negative g → movement in the opposite direction
+⚠️ Not good or bad — just direction
+
+ Message type :spectrum
+ 
+```text
+object
+model: "Wilcoxon 883M"
+serial_number: "24120017"
+timestamp: "2026-01-08T16:07:39Z"
+type: "spectrum_chunk"
+axis: "Y"
+capture_id: "659112"
+chunk_index: 10
+total_chunks: 11
+data: array[145]
+[0 … 9]
+0: 0
+1: 0
+2: 0
+3: 0
+4: 0
+5: 0
+6: 0
+7: 0
+8: 0
+9: 0
+[10 … 19]
+[20 … 29]
+[30 … 39]
+[40 … 49]
+[50 … 59]
+[60 … 69]
+[70 … 79]
+[80 … 89]
+[90 … 99]
+[100 … 109]
+[110 … 119]
+[120 … 129]
+[130 … 139]
+[140 … 144]
+```
+1️⃣ What you are drawing
+
+This data is from a SPECTRUM (FFT)
+
+Index : Value
+0 : 0
+1 : 0
+2 : 0
+3 : 0
+4 : 0
+5 : 0
+6 : 0
+7 : 0
+8 : 0
+9 : 0
+
+Meaning before drawing
+
+Index → Frequency band (Hz)
+
+Value → Vibration level (g)
+
+2️⃣ How to draw it (basic method – paper / Excel / software)
+Step 1: Draw the AXES
+
+X-axis (horizontal) → Frequency
+
+Y-axis (vertical) → Vibration level (g)
+```text
+Vibration (g)
+  |
+  |
+  |
+  |________________________ Frequency (Hz)
+```
+Step 2: Plot each point
+You plot one point per index:
+
+| Frequency Bin | Vibration (g) |
+|--------------|---------------|
+| 0            | 0             |
+| 1            | 0             |
+| 2            | 0             |
+| 3            | 0             |
+| 4            | 0             |
+| 5            | 0             |
+| 6            | 0             |
+| 7            | 0             |
+| 8            | 0             |
+| 9            | 0             |
+
+👉 All points sit on the zero line
+Step 3: Connect or bar-plot
+Resulting graph looks like this:
+```text
+Vibration (g)
+0.1 |
+0.05|
+0.00|■■■■■■■■■■________________ Frequency
+     0 1 2 3 4 5 6 7 8 9
+
+OR as a flat line:
+
+Vibration (g)
+0.00|——————————————— Frequency
+```
+----
